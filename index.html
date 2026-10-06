@@ -282,35 +282,91 @@ for (const pl of PLACES) {
 }
 
 // пруд и водопад
+// водопад: лента, которая течёт из пруда, переваливается через край и падает в облака
+const FALL_W = 0.8;
+const fallPath = (() => {
+  const pts = [];
+  const x0 = 9.3, x1 = 11.0, yTop = 0.62, rb = 0.6;
+  for (let i = 0; i <= 8; i++) pts.push([x0 + (x1 - x0) * i / 8, yTop]);
+  for (let i = 1; i <= 10; i++) { const q = i / 10 * Math.PI / 2; pts.push([x1 + Math.sin(q) * rb, yTop - rb + Math.cos(q) * rb]); }
+  for (let i = 1; i <= 28; i++) { const d = i / 28 * 14.5; pts.push([x1 + rb + 0.012 * d * d, yTop - rb - d]); }
+  let L = 0; const out = [];
+  pts.forEach((p, i) => { if (i) L += Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]); out.push([p[0], p[1], L]); });
+  return out;
+})();
+const FALL_LEN = fallPath[fallPath.length - 1][2], FALL_LIP = fallPath[8][2];
 const waterMat = new THREE.ShaderMaterial({
-  transparent: true, side: THREE.DoubleSide, depthWrite: false, fog: true, uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, { time: { value: 0 } }]),
+  transparent: true, fog: true,
+  uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, { time: { value: 0 }, len: { value: FALL_LEN }, lip: { value: FALL_LIP } }]),
   vertexShader: `varying vec2 vUv;
 #include <fog_pars_vertex>
     void main(){ vUv = uv; vec4 mvPosition = modelViewMatrix * vec4(position,1.); gl_Position = projectionMatrix * mvPosition;
 #include <fog_vertex>
     }`,
-  fragmentShader: `varying vec2 vUv; uniform float time;
+  fragmentShader: `varying vec2 vUv; uniform float time, len, lip;
 #include <fog_pars_fragment>
+    float h(float n){ return fract(sin(n * 91.31) * 4375.53); }
     void main(){
-      float y = vUv.y * 9. + time * 2.6;
-      float s = step(.82, fract(y + sin(vUv.x * 9. + floor(y) * 1.7) * .25));
-      vec3 c = mix(vec3(.30,.70,.96), vec3(.93,.98,1.), s);
-      c = mix(c, vec3(.2,.55,.9), smoothstep(.3,.0,abs(vUv.x-.5)) * .25);
-      float a = smoothstep(0., .25, vUv.y);
-      gl_FragColor = vec4(c, a * .95);
+      float u = vUv.x, L = vUv.y;
+      float fallK = smoothstep(lip, lip + 1.2, L);
+      float cols = 8.;
+      float c = floor(u * cols);
+      float sp = mix(0.9, 3.2, fallK) * (0.85 + 0.3 * h(c));
+      float f = fract(L * mix(1.1, 0.42, fallK) - time * sp + h(c + 3.));
+      float dash = step(0.66, f) * step(f, 0.82 + 0.1 * h(c + 7.));
+      vec3 deep = vec3(0.27, 0.64, 0.94), light = vec3(0.47, 0.80, 0.98);
+      vec3 col = mix(deep, light, step(0.5, fract(c * 0.5)));
+      col = mix(col, vec3(0.95, 0.99, 1.0), dash);
+      float foam = smoothstep(lip - 0.5, lip, L) * (1. - smoothstep(lip + 0.15, lip + 0.9, L));
+      col = mix(col, vec3(0.97, 1.0, 1.0), foam * 0.85);
+      float a = 1. - smoothstep(len - 4.5, len, L);
+      gl_FragColor = vec4(col, a);
 #include <fog_fragment>
-
     }`
 });
-waterMat.fog = true;
+const fallPuffs = [];
 {
   const a = 0, pp = polar(a, 8.3, 0.62);
   part(G.cyl(1.6, 1.6, 0.06, 28), '#58bff2', { p: [pp.x, 0.63, pp.z], t: 0.05, shadow: false });
   part(G.cyl(1.25, 1.25, 0.07, 28), '#8fd6f7', { p: [pp.x, 0.64, pp.z], line: false, shadow: false });
-  part(G.box(2.1, 0.06, 0.8), '#58bff2', { p: [pp.x + 1.6, 0.63, pp.z], line: false, shadow: false });
-  const fall = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 13, 1, 1), waterMat);
-  fall.position.set(R + 0.72, -5.8, 0); fall.rotation.y = -Math.PI / 2;
+  // объёмная струя: сплюснутая трубка вдоль пути, плюс чёрная оболочка для обводки
+  const tube = (grow, maxL) => {
+    const S = 14, P = [], UV = [], I = [];
+    let rows = 0;
+    for (let i = 0; i < fallPath.length; i++) {
+      const [x, y, L] = fallPath[i];
+      if (L > maxL) break;
+      const q = fallPath[Math.min(i + 1, fallPath.length - 1)], p0 = fallPath[Math.max(i - 1, 0)];
+      let tx = q[0] - p0[0], ty = q[1] - p0[1]; const tl = Math.hypot(tx, ty); tx /= tl; ty /= tl;
+      const nx = -ty, ny = tx;
+      const taper = Math.min(1, L / 0.5);
+      const rz = (0.42 * taper + grow), rn = (0.2 * taper + grow);
+      for (let j = 0; j <= S; j++) {
+        const th = j / S * Math.PI * 2, cz = Math.cos(th), sn = Math.sin(th);
+        P.push(x + nx * sn * rn, y + ny * sn * rn, cz * rz);
+        UV.push(j / S, L);
+      }
+      rows++;
+    }
+    for (let i = 0; i < rows - 1; i++) for (let j = 0; j < S; j++) {
+      const a = i * (S + 1) + j, b = a + 1, c = a + S + 1, d = c + 1;
+      I.push(a, c, b, b, c, d);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(UV, 2));
+    g.setIndex(I); return g;
+  };
+  const fall = new THREE.Mesh(tube(0, 1e9), waterMat); fall.renderOrder = 2;
   scene.add(fall);
+  const hull = new THREE.Mesh(tube(0.05, FALL_LEN - 4.2), INK);
+  scene.add(hull);
+  const n = fallPath.length;
+  const end = fallPath[n - 1];
+  for (let i = 0; i < 4; i++) {
+    const m = part(G.sph(0.7, 14, 10), '#ffffff', { p: [end[0] + (i - 1.5) * 0.45, -13.4 + (i % 2) * 0.3, (i % 2 ? 0.3 : -0.3)], t: 0.04, shadow: false });
+    fallPuffs.push(m);
+  }
 }
 
 // деревья, кусты, цветы
@@ -705,6 +761,7 @@ function frame() {
   camera.lookAt(cam.target);
 
   waterMat.uniforms.time.value = t;
+  fallPuffs.forEach((m, i) => m.scale.setScalar(1 + 0.18 * Math.sin(t * 3 + i * 1.7)));
   for (const f of anim) f(t, dt);
   for (const c of clouds) { c.a += c.sp * dt; c.g.position.set(Math.cos(c.a) * c.r, c.y + Math.sin(t * 0.3 + c.r) * 0.4, Math.sin(c.a) * c.r); }
 
